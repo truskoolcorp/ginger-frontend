@@ -4,6 +4,7 @@ import { useState, useCallback } from "react";
 import {
   LiveKitRoom,
   VideoTrack,
+  RoomAudioRenderer,
   useRemoteParticipants,
   useTracks,
   useRoomContext,
@@ -86,6 +87,15 @@ const styles = {
     fontSize: "20px",
     cursor: "pointer",
   },
+  micBtn: {
+    border: "none",
+    borderRadius: "50%",
+    width: "50px",
+    height: "50px",
+    fontSize: "20px",
+    cursor: "pointer",
+    transition: "all 0.2s ease",
+  },
   connectBtn: {
     background: "linear-gradient(135deg, #c47135 0%, #d68950 100%)",
     color: "white",
@@ -158,12 +168,15 @@ function AvatarVideo() {
 }
 
 // ============================================
-// CHAT CONTROLS
+// CHAT CONTROLS (Text + Mic)
 // ============================================
 function ChatControls() {
   const [message, setMessage] = useState("");
+  const [micEnabled, setMicEnabled] = useState(false);
   const room = useRoomContext();
 
+  // FIX: Send text via LiveKit's built-in text protocol
+  // This is what RoomInputOptions(text_enabled=True) listens for on the agent
   const sendMessage = useCallback(async () => {
     const text = message.trim();
     if (!text || !room) return;
@@ -171,32 +184,69 @@ function ChatControls() {
     setMessage("");
 
     try {
-      // Send text message via LiveKit data channel
-      const encoder = new TextEncoder();
-      const data = encoder.encode(
-        JSON.stringify({
-          event_type: "chat_message",
-          text: text,
-        })
-      );
-
-      await room.localParticipant.publishData(data, {
-        reliable: true,
-        topic: "agent-control",
+      // Use LiveKit's native sendText — this reaches the agent's text input
+      await room.localParticipant.sendText(text, {
+        topic: "lk-chat-topic",
+        destinationIdentities: [],
       });
     } catch (error) {
       console.error("Failed to send message:", error);
+
+      // Fallback: try the data channel method for older SDK versions
+      try {
+        const encoder = new TextEncoder();
+        const payload = JSON.stringify({
+          type: "user_text",
+          text: text,
+          timestamp: Date.now(),
+        });
+        await room.localParticipant.publishData(encoder.encode(payload), {
+          reliable: true,
+          topic: "lk-chat-topic",
+        });
+      } catch (fallbackError) {
+        console.error("Fallback send also failed:", fallbackError);
+      }
     }
   }, [message, room]);
 
+  // Toggle microphone for voice chat
+  const toggleMic = useCallback(async () => {
+    if (!room) return;
+
+    try {
+      const newState = !micEnabled;
+      await room.localParticipant.setMicrophoneEnabled(newState);
+      setMicEnabled(newState);
+    } catch (error) {
+      console.error("Failed to toggle microphone:", error);
+    }
+  }, [micEnabled, room]);
+
   return (
     <div style={styles.controls}>
+      {/* Mic toggle button */}
+      <button
+        onClick={toggleMic}
+        style={{
+          ...styles.micBtn,
+          background: micEnabled
+            ? "linear-gradient(135deg, #28a745 0%, #34c759 100%)"
+            : "#444",
+          color: "white",
+        }}
+        title={micEnabled ? "Mute microphone" : "Unmute microphone"}
+      >
+        {micEnabled ? "🎙️" : "🔇"}
+      </button>
+
+      {/* Text input */}
       <input
         type="text"
         placeholder="Type your message to Ginger..."
         value={message}
         onChange={(e) => setMessage(e.target.value)}
-        onKeyPress={(e) => e.key === "Enter" && sendMessage()}
+        onKeyDown={(e) => e.key === "Enter" && sendMessage()}
         style={styles.input}
       />
       <button onClick={sendMessage} style={styles.sendBtn}>
@@ -390,6 +440,9 @@ export default function GingerChat() {
               setIsConnecting(false);
             }}
           >
+            {/* FIX 1: This component plays ALL remote audio (Ginger's voice) */}
+            <RoomAudioRenderer />
+
             <ConnectionStatus />
             <AvatarVideo />
             <ChatControls />
